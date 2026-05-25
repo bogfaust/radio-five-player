@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Radio Player</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<img src="../../assets/icons/icon128.png" class="logo" />
+<h1 id="title">Radio Player</h1>
+
+<button id="toggleButton">Включить радио</button>
+
+<!-- Now Playing -->
+<div class="now-playing" id="nowPlaying">
+  <div class="now-playing-header">
+    <span class="now-playing-label" id="nowPlayingLabel">Сейчас играет</span>
+    <button class="like-btn" id="likeBtn" title="Лайк">♥</button>
+  </div>
+  <div class="now-playing-track" id="nowPlayingTrack">
+    <span class="track-artist" id="trackArtist">—</span>
+    <span class="track-title" id="trackTitle"></span>
+  </div>
+  <div class="track-progress">
+    <div class="track-bar">
+      <div class="track-bar-fill" id="trackBarFill"></div>
+    </div>
+    <div class="track-times">
+      <span id="trackElapsed">0:00</span>
+      <span id="trackDuration">0:00</span>
+    </div>
+  </div>
+</div>
+
+<div class="volume-container">
+  <div class="volume-label">
+    <span id="volumeLabel">Громкость</span>
+    <span class="volume-value" id="volumeValue">100%</span>
+  </div>
+  <input type="range" min="0" max="100" value="100" class="volume-slider" id="volumeSlider">
+</div>
+
+<button class="settings-btn" id="openSettings">Настройки</button>
+<button class="settings-btn liked-list-btn" id="openLiked">♥ Понравившиеся</button>
+
+<a href="https://radiofive.ru/" class="website-link" id="websiteLink" target="_blank">🌐 radiofive.ru</a>
+
+<div class="version"></div>
+
+<script type="module" src="popup.js"></script>
+</body>
+</html>

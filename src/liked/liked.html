@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Понравившиеся — Radio Five</title>
+  <link rel="stylesheet" href="liked.css">
+</head>
+<body>
+  <div class="header">
+    <img src="../../assets/icons/icon48.png" class="logo" />
+    <div class="header-text">
+      <h1>Понравившиеся</h1>
+      <span class="subtitle" id="subtitle">Загрузка...</span>
+    </div>
+    <button class="clear-btn" id="clearBtn" title="Очистить список">🗑</button>
+  </div>
+
+  <div id="list" class="list"></div>
+
+  <div id="empty" class="empty hidden">
+    <div class="empty-icon">♡</div>
+    <p id="emptyText">Вы ещё не лайкали песни.<br>Откройте плеер и нажмите ♥ во время воспроизведения.</p>
+  </div>
+
+  <script src="liked.js"></script>
+</body>
+</html>

@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Настройки - Radio Player</title>
+	<link rel="stylesheet" href="settings.css">
+</head>
+<body>
+<div class="header">
+	<img src="../../assets/icons/icon128.png" alt="Logo" />
+	<h1 id="pageTitle">Настройки</h1>
+	<p class="subtitle" id="pageSubtitle">Настройте поведение расширения</p>
+</div>
+
+<div class="settings-container">
+	<div class="setting-group">
+		<div class="setting-header" id="langHeader">Язык</div>
+		<div class="setting-description" id="langDescription">Выберите предпочитаемый язык</div>
+		<div class="language-selector">
+			<button class="language-btn" data-lang="ru">Русский</button>
+			<button class="language-btn" data-lang="en">English</button>
+		</div>
+	</div>
+
+	<div class="setting-group">
+		<div class="setting-header" id="autoplayHeader">Автовоспроизведение</div>
+		<div class="setting-description" id="autoplayDescription">Автоматически включать радио при запуске браузера</div>
+		<div class="toggle-container">
+			<label class="toggle-switch">
+				<input type="checkbox" id="autoplayToggle">
+				<span class="toggle-slider"></span>
+			</label>
+		</div>
+
+		<div class="volume-control">
+			<div class="volume-label">
+				<span id="startupVolumeLabel">Громкость при запуске</span>
+				<span class="volume-value" id="startupVolumeValue">100%</span>
+			</div>
+			<input type="range" min="0" max="100" value="100" class="volume-slider" id="startupVolumeSlider">
+		</div>
+	</div>
+
+	<details class="setting-group advanced-group">
+		<summary class="advanced-summary" id="advancedHeader">⚙️ Дополнительно</summary>
+		<div class="advanced-warning" id="advancedWarning">
+			⚠️ Менять только при необходимости. Неверный адрес — радио перестанет работать.
+		</div>
+		<div class="setting-header" id="streamUrlHeader">Адрес потока</div>
+		<div class="setting-description" id="streamUrlDescription">URL аудиопотока радиостанции</div>
+		<div class="stream-url-control">
+			<input type="text" id="streamUrlInput" class="stream-url-input" placeholder="https://radiofive.org:8443/radio" />
+			<button id="streamUrlReset" class="reset-btn">↺</button>
+		</div>
+
+		<div class="setting-header" id="streamDelayHeader">Задержка потока</div>
+		<div class="setting-description" id="streamDelayDescription">Компенсация буферной задержки стрима</div>
+		<div class="stream-delay-row">
+			<input type="number" id="streamDelayInput" class="stream-delay-input" min="0" max="60" value="16" />
+			<span id="streamDelayUnit">сек</span>
+			<button id="streamDelayReset" class="reset-btn">↺</button>
+		</div>
+	</details>
+</div>
+
+<div class="footer">
+</div>
+
+<div class="save-notification" id="saveNotification">
+	<span id="savedText">Настройки сохранены!</span>
+</div>
+
+<script type="module" src="settings.js"></script>
+</body>
+</html>
