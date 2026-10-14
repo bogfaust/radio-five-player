@@ -1,119 +1,205 @@
-import { STREAM_URL, resolveStreamUrl } from '../config.js';
+import { resolveStreamUrl } from '../config.js';
+
+const OFFSCREEN_PATH = 'src/offscreen/offscreen.html';
+const WATCHDOG_ALARM = 'radio-watchdog';
 
 let isToggling = false;
 
+// ---------- Вспомогательные функции ----------
 
-async function setupOffscreenDocument(path) {
+async function setupOffscreenDocument() {
   if (await chrome.offscreen.hasDocument()) return false; // already exists
   await chrome.offscreen.createDocument({
-    url: path,
+    url: OFFSCREEN_PATH,
     reasons: ['AUDIO_PLAYBACK'],
     justification: 'Playing audio for radio extension',
   });
   return true; // newly created
 }
 
+// Сообщение, адресованное именно offscreen-документу
+function sendToOffscreen(message) {
+  return chrome.runtime.sendMessage({ target: 'offscreen', ...message });
+}
+
+// Бейдж на иконке: ON — играет, ... — подключение/переподключение
+function applyBadge(status) {
+  let text = '';
+  if (status === 'playing') text = 'ON';
+  else if (status === 'connecting' || status === 'reconnecting') text = '...';
+  chrome.action.setBadgeText({ text });
+}
+
+// "Пользователь хочет, чтобы радио играло" — хранится в session storage,
+// потому что offscreen-документ Chrome может закрыть сам (см. watchdog ниже),
+// а service worker засыпает и теряет переменные
+async function setWantPlaying(value) {
+  await chrome.storage.session.set({ wantPlaying: value });
+  if (value) {
+    // Периодически проверяем, что offscreen-документ жив (минимум — раз в 30 сек)
+    chrome.alarms.create(WATCHDOG_ALARM, { periodInMinutes: 0.5 });
+  } else {
+    chrome.alarms.clear(WATCHDOG_ALARM);
+  }
+}
+
+async function getWantPlaying() {
+  const result = await chrome.storage.session.get(['wantPlaying']);
+  return result.wantPlaying === true;
+}
+
+async function applyVolume(volumePercent) {
+  await sendToOffscreen({ action: 'setVolume', volume: volumePercent / 100 });
+}
+
+// Запустить поток. reconnect = true — это восстановление, а не новый запуск
+async function startStream({ reconnect = false } = {}) {
+  await setupOffscreenDocument();
+  await setWantPlaying(true);
+
+  const result = await chrome.storage.sync.get(['streamUrl']);
+  const response = await sendToOffscreen({
+    action: 'play',
+    streamUrl: resolveStreamUrl(result.streamUrl),
+    reconnect
+  });
+
+  chrome.storage.local.set({ lastPlayTime: Date.now() });
+  applyBadge(response.status);
+  return response.status;
+}
+
+async function stopStream() {
+  await setWantPlaying(false);
+  if (await chrome.offscreen.hasDocument()) {
+    sendToOffscreen({ action: 'playStopFeedback' });
+    await sendToOffscreen({ action: 'pause' });
+  }
+  applyBadge('stopped');
+  return 'stopped';
+}
+
+// Текущий статус: stopped / connecting / reconnecting / playing
+async function getStatus() {
+  if (await chrome.offscreen.hasDocument()) {
+    const response = await sendToOffscreen({ action: 'getState' });
+    return response.status;
+  }
+
+  // Offscreen-документ закрыт, а пользователь хочет музыку —
+  // Chrome закрывает такие документы после 30 сек тишины (например, без интернета)
+  if (await getWantPlaying()) {
+    recoverPlayback().catch(err => console.error('Recover failed:', err));
+    return 'reconnecting';
+  }
+  return 'stopped';
+}
+
+// Восстановить воспроизведение, если оно должно идти, но не идёт
+async function recoverPlayback() {
+  if (!(await getWantPlaying())) return;
+
+  if (!(await chrome.offscreen.hasDocument())) {
+    console.log('Offscreen document is gone, restoring playback');
+    applyBadge('reconnecting');
+    const result = await chrome.storage.sync.get(['volume']);
+    await setupOffscreenDocument();
+    await applyVolume(result.volume !== undefined ? result.volume : 100);
+    await startStream({ reconnect: true });
+    return;
+  }
+
+  const response = await sendToOffscreen({ action: 'getState' });
+  if (response.status === 'stopped') {
+    await startStream({ reconnect: true });
+  } else {
+    applyBadge(response.status);
+  }
+}
+
+// ---------- Основные действия ----------
+
 async function toggleRadio() {
-  if (isToggling) return;
+  if (isToggling) return 'busy';
   isToggling = true;
 
   try {
-    await setupOffscreenDocument('src/offscreen/offscreen.html');
-
-    const stateResponse = await chrome.runtime.sendMessage({action: 'getState'});
-    const currentlyPlaying = stateResponse.isPlaying;
-
-    if (!currentlyPlaying) {
-      // Звук включения
-      chrome.runtime.sendMessage({action: 'playFeedback'});
-
-      const result = await chrome.storage.sync.get(['volume', 'streamUrl']);
-      const volume = result.volume !== undefined ? result.volume : 100;
-      await chrome.runtime.sendMessage({
-        action: 'setVolume',
-        volume: volume / 100
-      });
-
-      const response = await chrome.runtime.sendMessage({
-        action: 'play',
-        streamUrl: resolveStreamUrl(result.streamUrl)
-      });
-      const isPlaying = response.status === 'playing';
-      if (isPlaying) {
-        chrome.storage.local.set({ lastPlayTime: Date.now() });
-      }
-      chrome.action.setBadgeText({text: isPlaying ? "ON" : ""});
-      chrome.runtime.sendMessage({action: 'stateChanged', isPlaying}).catch(() => {});
-      return isPlaying;
+    // Радио считается включённым, даже если сейчас идёт переподключение
+    if (await getWantPlaying()) {
+      return await stopStream();
     }
 
-    // Звук выключения
-    chrome.runtime.sendMessage({action: 'playStopFeedback'});
+    await setupOffscreenDocument();
 
-    const response = await chrome.runtime.sendMessage({action: 'pause'});
-    const isPlaying = response.status === 'playing';
-    chrome.action.setBadgeText({text: isPlaying ? "ON" : ""});
-    chrome.runtime.sendMessage({action: 'stateChanged', isPlaying}).catch(() => {});
-    return isPlaying;
+    // Звук включения
+    sendToOffscreen({ action: 'playFeedback' });
+
+    const result = await chrome.storage.sync.get(['volume']);
+    await applyVolume(result.volume !== undefined ? result.volume : 100);
+
+    return await startStream();
   } finally {
     isToggling = false;
   }
 }
 
 async function startRadio() {
-  await setupOffscreenDocument('src/offscreen/offscreen.html');
+  await setupOffscreenDocument();
 
-  const result = await chrome.storage.sync.get(['startupVolume', 'streamUrl']);
+  const result = await chrome.storage.sync.get(['startupVolume']);
   const startupVolume = result.startupVolume !== undefined ? result.startupVolume : 100;
 
-  await chrome.storage.sync.set({volume: startupVolume});
+  await chrome.storage.sync.set({ volume: startupVolume });
+  await applyVolume(startupVolume);
 
-  await chrome.runtime.sendMessage({
-    action: 'setVolume',
-    volume: startupVolume / 100
-  });
-
-  const response = await chrome.runtime.sendMessage({
-    action: 'play',
-    streamUrl: resolveStreamUrl(result.streamUrl)
-  });
-  const isPlaying = response.status === 'playing';
-  if (isPlaying) {
-    chrome.storage.local.set({ lastPlayTime: Date.now() });
-  }
-  chrome.action.setBadgeText({text: isPlaying ? "ON" : ""});
-
-  return isPlaying;
+  return await startStream();
 }
 
+// ---------- Обработчики ----------
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === "toggleAudio") {
-    toggleRadio().then(isPlaying => {
-      sendResponse({isPlaying: isPlaying});
+  // Сообщения для offscreen-документа нас не касаются
+  if (request.target === 'offscreen') return false;
+
+  if (request.action === 'toggleAudio') {
+    toggleRadio().then(status => {
+      sendResponse({ status, isPlaying: status === 'playing' });
     });
-  } else if (request.action === "getState") {
-    setupOffscreenDocument('src/offscreen/offscreen.html').then(() => {
-      Promise.all([
-        chrome.runtime.sendMessage({action: 'getState'}),
-        chrome.storage.local.get(['lastPlayTime'])
-      ]).then(([response, stored]) => {
-        sendResponse({
-          isPlaying: response.isPlaying,
-          lastPlayTime: stored.lastPlayTime || null
-        });
+    return true;
+
+  } else if (request.action === 'getState') {
+    Promise.all([
+      getStatus(),
+      chrome.storage.local.get(['lastPlayTime'])
+    ]).then(([status, stored]) => {
+      sendResponse({
+        status,
+        isPlaying: status === 'playing',
+        lastPlayTime: stored.lastPlayTime || null
       });
     });
-  } else if (request.action === "setVolume") {
-    setupOffscreenDocument('src/offscreen/offscreen.html').then(() => {
-      chrome.runtime.sendMessage({
-        action: 'setVolume',
-        volume: request.volume
-      }).then(response => {
-        sendResponse(response);
-      });
+    return true;
+
+  } else if (request.action === 'setVolume') {
+    setupOffscreenDocument().then(() => {
+      return sendToOffscreen({ action: 'setVolume', volume: request.volume });
+    }).then(response => {
+      sendResponse(response);
     });
+    return true;
+
+  } else if (request.action === 'streamStatus') {
+    // Offscreen сообщает об изменении состояния потока — обновляем бейдж
+    applyBadge(request.status);
+    return false;
   }
-  return true;
+
+  return false;
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== WATCHDOG_ALARM) return;
+  recoverPlayback().catch(err => console.error('Watchdog failed:', err));
 });
 
 chrome.commands.onCommand.addListener((command) => {
@@ -123,6 +209,7 @@ chrome.commands.onCommand.addListener((command) => {
 });
 
 chrome.runtime.onStartup.addListener(() => {
+  chrome.action.setBadgeText({ text: '' });
   chrome.storage.sync.get(['autoplay'], function(result) {
     if (result.autoplay === true) {
       setTimeout(() => {
@@ -133,9 +220,10 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.runtime.onInstalled.addListener((details) => {
-  if (details.reason === 'install' || details.reason === 'update') {
-    // При установке не запускаем автоматически
-  }
+  // После установки/обновления/перезагрузки расширения радио не играет
+  chrome.action.setBadgeText({ text: '' });
+  chrome.alarms.clear(WATCHDOG_ALARM);
+  chrome.storage.session.set({ wantPlaying: false });
 });
 
 // Миграция: при каждом старте проверяем streamUrl в storage.

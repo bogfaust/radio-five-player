@@ -36,6 +36,51 @@ button:hover {
   background-color: #aac7fa;
 }
 
+/* Статус подключения */
+.conn-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-size: 0.9em;
+  color: #fdd663;
+  animation: conn-pulse 1.6s ease-in-out infinite;
+}
+
+.conn-status[hidden] {
+  display: none;
+}
+
+.conn-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #5f6368;
+  border-top-color: #fdd663;
+  border-radius: 50%;
+  animation: conn-spin 0.8s linear infinite;
+}
+
+/* Кнопка во время переподключения слегка "дышит" */
+button.reconnecting {
+  animation: conn-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes conn-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes conn-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conn-status, button.reconnecting, .conn-spinner {
+    animation-duration: 3s;
+  }
+}
+
 .settings-btn {
   background-color: #3c4043;
   color: #e8eaed;

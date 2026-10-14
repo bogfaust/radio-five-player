@@ -15,7 +15,9 @@ const translations = {
     like: "♡",
     loading: "Загрузка...",
     unknown: "—",
-    jingle: "Джингл"
+    jingle: "Джингл",
+    connecting: "Подключение...",
+    reconnecting: "Связь потеряна, восстанавливаем..."
   },
   en: {
     title: "Radio Player",
@@ -30,7 +32,9 @@ const translations = {
     like: "♡",
     loading: "Loading...",
     unknown: "—",
-    jingle: "Jingle"
+    jingle: "Jingle",
+    connecting: "Connecting...",
+    reconnecting: "Connection lost, reconnecting..."
   }
 };
 
@@ -44,8 +48,10 @@ let nextFetchTimeout = null;
 let progressInterval = null;
 let likedSongs = {};  // { [id]: { id, artist, title, likedAt } }
 let lastPlayTime = null;
-let csrfToken = null;  // Берём из заголовков ответа сервера
+let csrfToken = null;  // Токен берём из <meta name="_csrf"> страницы сайта
+let csrfHeaderName = 'X-CSRF-TOKEN';  // Имя заголовка, сервер сообщает его в <meta name="_csrf_header">
 let streamDelay = 16;  // Задержка потока в секундах
+let currentStatus = 'stopped';  // stopped / connecting / reconnecting / playing
 
 // Load settings
 chrome.storage.sync.get(['language', 'volume', 'streamDelay'], function(result) {
@@ -80,6 +86,30 @@ function updatePopupLanguage() {
   document.getElementById('volumeLabel').textContent = t('volume');
   document.getElementById('nowPlayingLabel').textContent = t('nowPlaying');
   document.getElementById('openLiked').textContent = t('likedList');
+  renderStatus();
+}
+
+// Обновляет кнопку и строку статуса под текущее состояние потока
+function renderStatus() {
+  const toggleButton = document.getElementById('toggleButton');
+  const connStatus = document.getElementById('connStatus');
+  const connStatusText = document.getElementById('connStatusText');
+  if (!toggleButton || !connStatus) return;
+
+  // Пока идёт подключение, кнопка остаётся "Выключить" — чтобы можно было отменить
+  const isActive = currentStatus !== 'stopped';
+  const isBusy = currentStatus === 'connecting' || currentStatus === 'reconnecting';
+
+  toggleButton.textContent = isActive ? t('stop') : t('play');
+  toggleButton.classList.toggle('reconnecting', isBusy);
+
+  connStatus.hidden = !isBusy;
+  if (isBusy) connStatusText.textContent = t(currentStatus);
+}
+
+function setStatus(status) {
+  currentStatus = status || 'stopped';
+  renderStatus();
 }
 
 function updateVolumeUI() {
@@ -174,48 +204,83 @@ async function getCsrfTokenFromCookies() {
   return null;
 }
 
+// Ищем токен в тексте HTML страницы
+function findCsrfInHtml(html) {
+  // <meta name="_csrf" content="uuid" />
+  let m = html.match(/<meta[^>]+name=["']_?csrf["'][^>]+content=["']([^"']{8,})["'][^>]*>/i);
+  if (m) return m[1];
+
+  // Атрибуты в обратном порядке: <meta content="..." name="_csrf">
+  m = html.match(/<meta[^>]+content=["']([^"']{8,})["'][^>]+name=["']_?csrf["'][^>]*>/i);
+  if (m) return m[1];
+
+  // window._csrf = "..." или var _csrf = "..." или csrfToken = "..."
+  m = html.match(/(?:window\._?csrf(?:Token)?|var\s+_?csrf(?:Token)?|\bcsrfToken)\s*[=:]\s*["']([^"']{8,})["']/i);
+  if (m) return m[1];
+
+  // Любое значение в кавычках рядом со словом csrf
+  m = html.match(/csrf[^"']{0,30}["']([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']/i);
+  if (m) return m[1];
+
+  return null;
+}
+
 async function fetchCsrfTokenFromPage() {
-  // Загружаем главную страницу и ищем токен в HTML
-  // Spring Security обычно кладёт его в <meta name="_csrf"...>
-  // или в JS-переменную window._csrf / window.csrfToken
-  try {
-    const resp = await fetch(`${API_BASE}/head`, { credentials: 'include' });
-    const html = await resp.text();
+  // Пробуем несколько страниц: сначала лёгкий /head, потом главную
+  const paths = ['/head', '/'];
+  for (const path of paths) {
+    try {
+      const resp = await fetch(`${API_BASE}${path}`, { credentials: 'include' });
 
-    // <meta name="_csrf" content="uuid" />
-    let m = html.match(/<meta[^>]+name=["']_?csrf["'][^>]+content=["']([0-9a-f-]{36})["'][^>]*>/i);
-    if (m) return m[1];
+      // Токен мог прийти в заголовках этого ответа
+      const headerToken = extractCsrfFromHeaders(resp);
+      if (headerToken) return headerToken;
 
-    // <meta name="_csrf_header" ...> + <meta name="_csrf" content="uuid">  (порядок может быть любой)
-    m = html.match(/content=["']([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["'][^>]*>/i);
-    if (m) return m[1];
+      const html = await resp.text();
+      const token = findCsrfInHtml(html);
+      if (token) {
+        // Имя заголовка (по умолчанию X-CSRF-TOKEN)
+        const h = html.match(/<meta[^>]+name=["']_csrf_header["'][^>]+content=["']([^"']+)["']/i);
+        if (h) csrfHeaderName = h[1];
+        return token;
+      }
 
-    // window._csrf = "uuid" или var _csrf = "uuid" или csrfToken = "uuid"
-    m = html.match(/(?:window\._?csrf(?:Token)?|var\s+_?csrf(?:Token)?|csrfToken)\s*=\s*["']([0-9a-f-]{36})["'](?:\s|;)/i);
-    if (m) return m[1];
-
-    // Любой UUID в JS-скрипте рядом со словом csrf
-    m = html.match(/csrf[^"']{0,30}["']([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']/i);
-    if (m) return m[1];
-
-  } catch(e) {
-    console.error('Failed to fetch CSRF from page:', e);
+      // Диагностика: показываем, что реально вернул сервер
+      console.warn(`CSRF not found in ${path}:`, {
+        status: resp.status,
+        finalUrl: resp.url,
+        redirected: resp.redirected,
+        contentType: resp.headers.get('content-type'),
+        bodyStart: html.slice(0, 300)
+      });
+    } catch (e) {
+      console.error(`Failed to fetch ${path}:`, e);
+    }
   }
   return null;
 }
 
-async function ensureCsrfToken() {
-  if (csrfToken) return csrfToken;
+async function ensureCsrfToken(force = false) {
+  if (csrfToken && !force) return csrfToken;
+  csrfToken = null;
 
-  // Пробуем взять из кук (на случай если сервер всё же ставит куку)
-  let token = await getCsrfTokenFromCookies();
+  // Основной способ: токен из <meta name="_csrf"> страницы сайта
+  // (токен привязан к сессии, куки браузер отправит сам через credentials: 'include')
+  let token = await fetchCsrfTokenFromPage();
   if (token) { csrfToken = token; return token; }
 
-  // Парсим токен из HTML /head (лёгкий эндпоинт специально для этого)
-  token = await fetchCsrfTokenFromPage();
+  // Запасной способ: токен в куке (на случай если сервер когда-нибудь станет ставить её)
+  token = await getCsrfTokenFromCookies();
   if (token) { csrfToken = token; return token; }
 
-  console.warn('CSRF token not found anywhere');
+  // Диагностика: какие куки вообще видит расширение для этого домена
+  try {
+    const cookies = await chrome.cookies.getAll({ url: API_BASE });
+    console.warn('CSRF token not found anywhere. Cookies visible for', API_BASE, ':',
+      cookies.map(c => c.name));
+  } catch (e) {
+    console.warn('CSRF token not found anywhere, and cookies are not accessible:', e.message);
+  }
   return null;
 }
 
@@ -278,30 +343,59 @@ async function sendLike(songId) {
   likeBtn.disabled = true;
 
   try {
-    // Получаем актуальный CSRF-токен (из кук или загружая главную страницу)
+    // Получаем актуальный CSRF-токен (с главной страницы сайта)
     await ensureCsrfToken();
 
-    const headers = {
-      'accept': '*/*',
-      'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
-      'x-requested-with': 'XMLHttpRequest'
+    const doLike = () => {
+      const headers = {
+        'accept': '*/*',
+        'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'x-requested-with': 'XMLHttpRequest'
+      };
+      if (csrfToken) {
+        headers[csrfHeaderName] = csrfToken;
+      }
+      return fetch(`${API_BASE}/api/like`, {
+        method: 'POST',
+        headers,
+        body: 'id=' + songId,
+        credentials: 'include',
+        redirect: 'manual'  // Не даём fetch превращать POST в GET при редиректе
+      });
     };
-    if (csrfToken) {
-      headers['x-csrf-token'] = csrfToken;
+
+    let resp = await doLike();
+
+    // Сервер ответил редиректом на POST: часто он ставит куку и просит повторить запрос
+    if (resp.type === 'opaqueredirect') {
+      console.warn('Like POST was redirected by server, retrying once');
+      resp = await doLike();
+      if (resp.type === 'opaqueredirect') {
+        throw new Error('Server keeps redirecting POST /api/like (check Network tab: status and Location header)');
+      }
     }
 
-    const resp = await fetch(`${API_BASE}/api/like`, {
-      method: 'POST',
-      headers,
-      body: 'id=' + songId,
-      credentials: 'include'
-    });
+    // Если сервер ответил 403 — токен/сессия устарели: берём свежий токен и пробуем ещё раз
+    if (resp.status === 403) {
+      console.warn('Like got HTTP 403, refreshing CSRF token and retrying');
+      await ensureCsrfToken(true);
+      resp = await doLike();
+    }
 
     // Сервер может прислать обновлённый токен и в ответе на лайк
     const newToken = extractCsrfFromHeaders(resp);
     if (newToken) csrfToken = newToken;
 
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    if (!resp.ok) {
+      // Диагностика: на какой адрес реально ушёл запрос (редирект превращает POST в GET и даёт 405)
+      console.error('Like request failed: ' + JSON.stringify({
+        status: resp.status,
+        type: resp.type,
+        url: resp.url,
+        redirected: resp.redirected
+      }));
+      throw new Error('HTTP ' + resp.status);
+    }
 
     // Сохраняем полные данные песни, а не только айди
     likedSongs[songId] = {
@@ -331,13 +425,13 @@ document.addEventListener('DOMContentLoaded', function() {
   document.querySelector('.version').textContent = `Version ${version}`;
 
   chrome.runtime.sendMessage({action: "getState"}, function(response) {
-    updateButtonText(response.isPlaying);
+    setStatus(response.status);
     lastPlayTime = response.lastPlayTime || null;
   });
 
   toggleButton.addEventListener('click', function() {
     chrome.runtime.sendMessage({action: "toggleAudio"}, function(response) {
-      updateButtonText(response.isPlaying);
+      if (response.status !== 'busy') setStatus(response.status);
     });
   });
 
@@ -348,10 +442,6 @@ document.addEventListener('DOMContentLoaded', function() {
     chrome.runtime.sendMessage({ action: "setVolume", volume: volume / 100 });
     chrome.storage.sync.set({volume: volume});
   });
-
-  function updateButtonText(isPlaying) {
-    toggleButton.textContent = isPlaying ? t('stop') : t('play');
-  }
 
   document.getElementById('openSettings').addEventListener('click', function() {
     chrome.runtime.openOptionsPage();
@@ -370,10 +460,11 @@ document.addEventListener('DOMContentLoaded', function() {
 
   progressInterval = setInterval(updateProgressBar, 1000);
 
-  // Обновляем кнопку если состояние изменилось снаружи (хоткей, другой попап)
+  // Обновляем кнопку при любых изменениях состояния потока:
+  // хоткей, потеря связи, переподключение, успешное восстановление
   chrome.runtime.onMessage.addListener(function(message) {
-    if (message.action === 'stateChanged') {
-      updateButtonText(message.isPlaying);
+    if (message.action === 'streamStatus') {
+      setStatus(message.status);
     }
   });
 });
